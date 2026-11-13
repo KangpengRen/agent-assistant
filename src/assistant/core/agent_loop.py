@@ -92,7 +92,7 @@ class AgentLoop:
 
     def _finalize(self, messages: list, reason: str) -> str:
         """收尾轮：禁用工具的最后一次调用，把残局翻译成可交接的总结"""
-        messages.append({ # 【关键修复】拼写 apppend -> append
+        messages.append({
             "role": "user",
             "content": f"运行预算已耗尽（{reason}）。请立即停止行动，"
                        f"总结：已完成事项、未完成事项、下一步建议"
