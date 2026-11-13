@@ -4,14 +4,17 @@
 
 import json
 from typing import Any
+from .budget import LoopState, StopCondition
 from .types import AgentLoopOptions, AgentEvent
 from ..llm.client import DeepSeekClient
 from ..tools.registry import build_tool_registry, tools_to_wire
 
 
 class AgentLoop:
-    def __init__(self, opts: AgentLoopOptions):
+    def __init__(self, opts: AgentLoopOptions, stop_conditions: list[StopCondition], verifier=None):
         self.opts = opts
+        self.stop_conditions = stop_conditions
+        self.verifier = verifier
         self.tools_by_name = build_tool_registry(opts.tools)
         self.llm = DeepSeekClient()
 
@@ -24,30 +27,51 @@ class AgentLoop:
             {"role": "system", "content": self.opts.system_prompt},
             {"role": "user", "content": task}
         ]
+        state = LoopState()
 
-        for turn in range(1, self.opts.max_turns + 1):
-            self._emit("llm_call_start", turn)
+        while True:
+            # 1. 预算检查 (熔断机制)
+            for cond in self.stop_conditions:
+                d = cond.check(state)
+                if d.should_stop:
+                    self._emit("aborted", state.turn, reason=d.reason)
+                    return self._finalize(messages, d.reason)
 
-            # 1. 调用 LLM
+            state.turn += 1
+            self._emit("llm_call_start", state.turn)
+
+            # 2. 调用 LLM
             reply = self.llm.chat(messages, tools_to_wire(self.opts.tools))
             choice = reply["choices"][0]
             message = choice["message"]
+            state.record_usage(reply.get("usage", {}))
             messages.append(message)
 
-            # 2. 输出文本事件
+            # 3. 输出文本事件
             if text := message.get("content"):
-                self._emit("text", turn, text=text.strip())
+                self._emit("text", state.turn, text=text.strip())
 
-            # 3. 终止判断
+            # 4. 终止判断与外部校验 (Verifier)
             if choice.get("finish_reason") != "tool_calls":
-                self._emit("done", turn, final_text=message.get("content", ""))
-                return message.get("content", "")
+                final_text = self.llm._exact_content(reply)
+                # 如果有外部校验器，且校验返回了错误信息
+                if self.verifier and (err := self.verifier(messages)):
+                    self._emit("verification_failed", state.turn, error=err)
+                    messages.append({
+                        "role": "user",
+                        "content": f"任务未通过外部校验：{err}。请根据要求修正后继续。"
+                    })
+                    continue  # 【关键修复】不要 return，继续循环让大模型重新生成！
 
-            # 4. 执行工具调用
+                # 校验通过，正常退出
+                self._emit("done", state.turn, final_text=final_text)
+                return final_text
+
+            # 5. 执行工具调用
             for tool_call in message.get("tool_calls", []):
                 name = tool_call["function"]["name"]
                 args = json.loads(tool_call["function"]["arguments"])
-                self._emit("tool_call", turn, name=name, input=args)
+                self._emit("tool_call", state.turn, name=name, input=args)
 
                 try:
                     tool = self.tools_by_name.get(name)
@@ -59,12 +83,21 @@ class AgentLoop:
                     output = f"工具调用失败: {e}"
                     is_error = True
 
-                self._emit("tool_result", turn, name=name, output=output, is_error=is_error)
+                self._emit("tool_result", state.turn, name=name, output=output, is_error=is_error)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call["id"],
                     "content": str(output)
                 })
 
-        self._emit("aborted", self.opts.max_turns, reason="max_turns")
-        raise RuntimeError(f"达到 {self.opts.max_turns} 轮上限，未完成任务")
+    def _finalize(self, messages: list, reason: str) -> str:
+        """收尾轮：禁用工具的最后一次调用，把残局翻译成可交接的总结"""
+        messages.append({ # 【关键修复】拼写 apppend -> append
+            "role": "user",
+            "content": f"运行预算已耗尽（{reason}）。请立即停止行动，"
+                       f"总结：已完成事项、未完成事项、下一步建议"
+        })
+        # 禁用工具，强制总结
+        reply = self.llm.chat(messages, tools=[])
+        content = self.llm._exact_content(reply)
+        return f"任务因 {reason} 终止\n" + content

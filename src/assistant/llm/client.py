@@ -39,3 +39,7 @@ class DeepSeekClient:
                 if attempt == 2:
                     raise
         raise RuntimeError("API 请求重试耗尽")
+
+    @staticmethod
+    def _exact_content(reply: dict[str, Any]) -> str:
+        return reply["choices"][0]["message"].get("content", "")

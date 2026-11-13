@@ -28,5 +28,4 @@ class AgentLoopOptions:
     """Agent 循环的配置选项"""
     system_prompt: str
     tools: list[Tool]
-    max_turns: int
     on_event: Optional[Callable[[AgentEvent], None]] = None
