@@ -6,6 +6,7 @@
 import os
 import requests
 from typing import Any
+import time
 
 class DeepSeekClient:
     def __init__(self, api_key: str | None = None):
@@ -31,13 +32,23 @@ class DeepSeekClient:
         for attempt in range(3):
             try:
                 resp = requests.post(self.base_url, headers=headers, json=payload, timeout=30)
+
+                # 成功直接返回
                 if resp.status_code == 200:
                     return resp.json()
-                if resp.status_code < 500:
-                    raise RuntimeError(f"API {resp.status_code}: {resp.text}")
+
+                # 如果是 429 限流 或 5xx 服务端错误，进行指数退避重试
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    time.sleep(2 ** attempt)  # 第1次等1秒，第2次等2秒，第3次等4秒
+                    continue
+
+                # 其他客户端错误（如 401 鉴权失败、400 参数错误），重试也没用，直接抛出
+                raise RuntimeError(f"不可重试的 API 错误 {resp.status_code}: {resp.text}")
+
             except requests.RequestException as e:
                 if attempt == 2:
-                    raise
+                    raise RuntimeError(f"网络请求彻底失败: {e}")
+                time.sleep(1)
         raise RuntimeError("API 请求重试耗尽")
 
     @staticmethod
