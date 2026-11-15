@@ -18,7 +18,7 @@ class Tool(Protocol):
 @dataclass
 class AgentEvent:
     """生命周期事件，用于 GUI 渲染或可观测性"""
-    type: Literal["llm_call_start", "text", "tool_call", "tool_result", "done", "aborted"]
+    type: Literal["llm_call_start", "text", "tool_call", "tool_result", "done", "aborted", "verification_failed"]
     turn: int
     payload: dict[str, Any] = field(default_factory=dict)
 

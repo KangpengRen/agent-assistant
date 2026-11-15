@@ -15,36 +15,36 @@ class DeepSeekClient:
             raise ValueError("缺少环境变量 DEEPSEEK_API_KEY")
         self.base_url = "https://api.deepseek.com/chat/completions"
 
-    def chat(self, messages: list[dict], tools: list[dict]) -> dict[str, Any]:
+    def chat(self, messages: list[dict], tools: list[dict] = None, reasoning_effort: str = "low") -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "deepseek-chat",
             "messages": messages,
-            "tools": tools,
             "stream": False,
             "temperature": 0.7,
-            "max_tokens": 1024
+            "max_tokens": 4096,  # 预留足够长度，防止 Planner 写长计划被截断
         }
-        # 简单的重试机制（生产环境可改为指数退避）
+
+        if tools:
+            payload["tools"] = tools
+
+        # 【非对称思考预算】Planner 用推理模型，Executor 用快速模型
+        if reasoning_effort == "high":
+            payload["model"] = "deepseek-reasoner"
+        else:
+            payload["model"] = "deepseek-chat"
+
         for attempt in range(3):
             try:
-                resp = requests.post(self.base_url, headers=headers, json=payload, timeout=30)
-
-                # 成功直接返回
+                resp = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
                 if resp.status_code == 200:
                     return resp.json()
-
-                # 如果是 429 限流 或 5xx 服务端错误，进行指数退避重试
                 if resp.status_code == 429 or resp.status_code >= 500:
-                    time.sleep(2 ** attempt)  # 第1次等1秒，第2次等2秒，第3次等4秒
+                    time.sleep(2 ** attempt)
                     continue
-
-                # 其他客户端错误（如 401 鉴权失败、400 参数错误），重试也没用，直接抛出
                 raise RuntimeError(f"不可重试的 API 错误 {resp.status_code}: {resp.text}")
-
             except requests.RequestException as e:
                 if attempt == 2:
                     raise RuntimeError(f"网络请求彻底失败: {e}")

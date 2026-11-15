@@ -17,12 +17,18 @@ class ListFilesTool(Tool):
     }
 
     def execute(self, input: dict[str, Any]) -> str:
-        return "\n".join(sorted(p.name for p in Path(input.get("dir", ".")).iterdir()))
+        target_dir = Path(input.get("dir", "."))
+        if not target_dir.is_dir():
+            return f"错误：{target_dir} 不是有效目录"
+
+        # 只返回第一层，不递归
+        entries = sorted(p.name for p in target_dir.iterdir())
+        return "\n".join(entries)
 
 
 class ReadFileTool(Tool):
     name = "read_file"
-    description = "读取文件内容（截断到 20k 字符）"
+    description = "读取文件内容（截断到 20k 字符），返回内容及总字符数。"
     input_schema = {
         "type": "object",
         "properties": {"path": {"type": "string", "description": "文件路径"}},
@@ -30,7 +36,12 @@ class ReadFileTool(Tool):
     }
 
     def execute(self, input: dict[str, Any]) -> str:
-        return Path(input["path"]).read_text(encoding="utf-8")[:20_000]
+        p = Path(input["path"])
+        if not p.exists():
+            raise FileNotFoundError(f"文件不存在：{p}")
+        content = p.read_text(encoding="utf-8")
+        # 返回总字数，帮助大模型判断字数是否达标
+        return f"【文件元数据】总字符数：{len(content)}\n\n【正文内容】\n{content[:20_000]}"
 
 
 class WriteFileTool(Tool):

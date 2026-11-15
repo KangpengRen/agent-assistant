@@ -7,12 +7,16 @@ class LoopState:
     turn: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    total_cost: float = 0.0
     started_at: float = field(default_factory=time.monotonic)
 
     def record_usage(self, usage: dict) -> None:
         # 兼容 DeepSeek/OpenAI 和 Claude 的字段名
         self.input_tokens += usage.get("prompt_tokens", usage.get("input_tokens", 0))
         self.output_tokens += usage.get("completion_tokens", usage.get("output_tokens", 0))
+        # 计算成本 (DeepSeek-chat 参考价：$0.14/M input, $0.28/M output)
+        # 这里为了演示，使用估算值
+        self.total_cost = (self.input_tokens * 0.14 + self.output_tokens * 0.28) / 1_000_000
 
 @dataclass
 class StopDecision:
@@ -38,12 +42,8 @@ class TokenBudget:
 @dataclass
 class CostBudget:
     limit_used: float
-    price_in: float = 5.0
-    price_out: float = 25.0
     def check(self, s: LoopState) -> StopDecision:
-        # 注意：DeepSeek 的 API 计费单位通常是百万 tokens（此处仅为示例逻辑）
-        cost = (s.input_tokens * self.price_in + s.output_tokens * self.price_out) / 1e6
-        return StopDecision(cost >= self.limit_used, f"cost_budget(${cost:.4f}/${self.limit_used})")
+        return StopDecision(s.total_cost >= self.limit_used, f"cost_budget(${s.total_cost:.4f}/${self.limit_used})")
 
 @dataclass
 class WallClock:
