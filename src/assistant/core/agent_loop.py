@@ -14,6 +14,22 @@ class AgentAbortedError(RuntimeError):
     """当预算耗尽导致强制中止时抛出"""
     pass
 
+# 强制模型使用的“交卷”工具
+SUBMIT_RESULT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_task_result",
+        "description": "任务执行完毕（或遇到无法克服的困难）后，必须调用此工具提交最终状态。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["success", "failed"]},
+                "summary": {"type": "string", "description": "执行结果的最终文本摘要，或失败的详细原因"}
+            },
+            "required": ["status", "summary"]
+        }
+    }
+}
 
 class AgentLoop:
     def __init__(self, opts: AgentLoopOptions, stop_conditions: list[StopCondition], verifier=None):
@@ -50,7 +66,9 @@ class AgentLoop:
 
             # 2. 调用 LLM (低推理预算)
             try:
-                reply = self.llm.chat(messages, tools_to_wire(self.opts.tools), reasoning_effort="low")
+                # 把交卷工具混入原本的工具列表发给大模型
+                current_tools = tools_to_wire(self.opts.tools) + [SUBMIT_RESULT_TOOL]
+                reply = self.llm.chat(messages, tools=current_tools, reasoning_effort="low")
             except Exception as e:
                 self._emit("aborted", state.turn, reason=f"LLM_API_ERROR: {e}")
                 self.total_cost = state.total_cost
@@ -68,28 +86,52 @@ class AgentLoop:
             if choice.get("finish_reason") == "length":
                 self._emit("aborted", state.turn, reason="max_tokens截断，正在请求精简重试")
                 messages.pop()
-                messages.append({
-                    "role": "user",
-                    "content": "你刚才的输出触发了最大长度限制被硬截断了。请精简你的回答，或者分多次调用工具。"
-                })
+                messages.append({"role": "user", "content": "输出触发了最大长度限制被硬截断，请精简你的回答。"})
                 continue
 
-            # 4. 终止判断与外部校验
+            # 处理终止与交卷逻辑
             if choice.get("finish_reason") != "tool_calls":
-                final_text = self.llm._exact_content(reply)
-                if self.verifier and (err := self.verifier(messages)):
-                    self._emit("verification_failed", state.turn, error=err)
-                    messages.append({"role": "user", "content": f"任务未通过外部校验：{err}。请根据要求修正后继续。"})
-                    continue
-
-                self._emit("done", state.turn, final_text=final_text)
+                # 如果大模型不调工具，直接返回纯文本，说明它在“嘴炮”或者想强行结束
+                # 只有一种情况允许它结束：它是通过调用了 submit_task_result 结束的（这会在下面的 for 循环里处理）
+                self._emit("aborted", state.turn, reason="模型未使用规定工具交卷")
                 self.total_cost = state.total_cost
-                return final_text
+                raise AgentAbortedError("执行器违规：未调用 submit_task_result 工具就擅自结束了任务。")
 
-            # 5. 执行工具调用
+            # 执行工具调用
             for tool_call in message.get("tool_calls", []):
                 name = tool_call["function"]["name"]
                 args = json.loads(tool_call["function"]["arguments"])
+
+                # 拦截交卷工具
+                if name == "submit_task_result":
+                    status = args.get("status")
+                    summary = args.get("summary")
+
+                    if status == "failed":
+                        self._emit("aborted", state.turn, reason=f"模型宣告失败: {summary}")
+                        self.total_cost = state.total_cost
+                        raise AgentAbortedError(f"执行器宣告失败：{summary}")
+
+                    # 如果状态是 success，再让 verifier 过一眼（防造假）
+                    if self.verifier:
+                        # 构造一个虚拟的对话历史给 verifier 看
+                        temp_msgs = messages + [{"role": "assistant", "content": summary}]
+                        if err := self.verifier(temp_msgs):
+                            self._emit("verification_failed", state.turn, error=err)
+                            # 校验没通过，强行打回！
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "content": f"【外部系统校验拦截】你声称成功了，但校验失败：{err}。请继续修复。"
+                            })
+                            break # 跳出工具循环，重新进入大循环让大模型反思
+
+                    # 校验通过，正常退出
+                    self._emit("done", state.turn, final_text=summary)
+                    self.total_cost = state.total_cost
+                    return summary
+
+                # ---- 以下为普通工具的常规处理 ----
                 self._emit("tool_call", state.turn, name=name, input=args)
 
                 try:

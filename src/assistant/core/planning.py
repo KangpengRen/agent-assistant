@@ -48,7 +48,6 @@ class PlanThenExecute:
 
     def plan(self, task: str, context: str = "") -> list[Step]:
         prompt = f"任务：{task}\n{context}\n请仔细规划执行步骤。"
-        # 全局规划：高推理预算
         reply = self.llm.chat(
             messages=[{"role": "user", "content": prompt}],
             tools=[PLAN_TOOL],
@@ -79,7 +78,9 @@ class PlanThenExecute:
             done_ctx = "\n".join(f"步骤{s.id}[{s.goal}]：{s.result}" for s in steps if s.status == "done")
 
             print(f"\n[Executor] 开始执行步骤 {step.id}: {step.goal}")
-            executor = self.make_executor()
+
+            # 把当前的 step 传给 make_executor，方便动态挂载 verifier
+            executor = self.make_executor(step)
             try:
                 # 执行器只看到"已完成结论 + 当前步骤"
                 step.result = executor.run(

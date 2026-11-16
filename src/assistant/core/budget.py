@@ -40,12 +40,6 @@ class TokenBudget:
         return StopDecision(used >= self.limit, f"token_budget({used}/{self.limit})")
 
 @dataclass
-class CostBudget:
-    limit_used: float
-    def check(self, s: LoopState) -> StopDecision:
-        return StopDecision(s.total_cost >= self.limit_used, f"cost_budget(${s.total_cost:.4f}/${self.limit_used})")
-
-@dataclass
 class WallClock:
     limit_seconds: float
     def check(self, s: LoopState) -> StopDecision:
